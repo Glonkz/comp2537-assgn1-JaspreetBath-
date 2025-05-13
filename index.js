@@ -4,7 +4,8 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const MongoStore = require('connect-mongo');
 const Joi = require('joi');
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const path = require('path');
 
 const saltRounds = 12;
 const app = express();
@@ -44,247 +45,317 @@ const client = new MongoClient(mongoUri, {
     }
 });
 
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+
 let db, userCollection;
 
-client.connect().then(() => {
-    db = client.db(mongodb_database);
-    userCollection = db.collection('users');
-    console.log("Successfully connected to MongoDB Atlas!");
-}).catch(err => {
-    console.error("Failed to connect to MongoDB Atlas", err);
-    process.exit(1);
-});
-
-
-console.log("DEBUG: MongoStore mongoUrl:", mongoUri); //debug
-const mongoStore = MongoStore.create({
-    mongoUrl: `mongodb+srv://${mongodb_user}:${mongodb_password}@${mongodb_host}/${mongodb_database}?retryWrites=true&w=majority`,
-    crypto: {
-        secret: mongodb_session_secret
-    }
-});
-
-app.use(session({
-    secret: node_session_secret,
-    store: mongoStore,
-    resave: false,
-    saveUninitialized: false,
-    cookie: { maxAge: expireSession }
-}));
-
-app.use(express.urlencoded({ extended: false }));
-app.use(express.static('public'));
-
-// Is the user authenticated?
-const requireAuth = (req, res, next) => {
-    if (!req.session.isAuthenticated) {
-        console.log('User not authenticated');
-        return res.redirect('/');
-    }
-    next();
-};
-
-// If so then....
-const requireNoAuth = (req, res, next) => {
-    if (req.session.isAuthenticated) {
-        console.log('User already authenticated');
-        return res.redirect('/members');
-    }
-    next();
-};
-
-const getRandomImage = () => {
-
-    const images = ['IMG_0140.JPG', 'IMG_0518.jpg', 'IMG_0671.jpg', 'IMG_1270.jpg', 'IMG_1598.JPG', 'IMG_2242.JPG', 'IMG_4919.PNG'];
-
-    const randomIndex = Math.floor(Math.random() * images.length);
-    return `/public/${images[randomIndex]}`;
-};
-
-app.get('/', (req, res) => {
-    let buttons;
-    let greeting = '<h1>Welcome! Please Sign Up or Log In</h1>';
-
-    if (req.session.isAuthenticated) {
-        greeting = `<h1>Hello, ${req.session.name}!</h1>`;
-        buttons = `
-        <a href='/members'> <button>Members Area</button> </a>
-        <br><br>
-        <a href='/logout'> <button>Logout</button> </a>
-        `;
-    } else {
-        buttons = `
-        <a href='/signup'> <button>Sign Up</button> </a>
-        <br><br>
-        <a href='/login'> <button>Log In</button> </a>
-        `;
-    }
-    res.send(`
-        ${greeting}
-        ${buttons}
-        `);
-});
-
-app.get('/signup', requireNoAuth, (req, res) => {
-    const html = `
-    <h1>Create User</h1>
-    <form action='/signupSubmit' method='post'>
-        <input name='name' type='text' placeholder='name' required>
-            <br>
-        <input name='email' type='email' placeholder='email' required>
-            <br>
-        <input name='password' type='password' placeholder='password' required>
-            <br>
-        <button type='submit'>Submit</button>
-    </form>
-    `;
-    res.send(html);
-});
-
-app.post('/signupSubmit', requireNoAuth, async (req, res) => {
-    const { name, email, password } = req.body;
-
-
-    const schema = Joi.object({
-        name: Joi.string().alphanum().max(20).required(),
-        email: Joi.string().email().required(),
-        password: Joi.string().max(20).required()
-    });
-
-    const validationResult = schema.validate({ name, email, password });
-
-    if (validationResult.error) {
-
-        console.log("Signup validation error:", validationResult.error.details[0].message);
-        return res.status(400).send(`
-            Error: ${validationResult.error.details[0].message}. <br>
-            <a href="/signup">Try again</a>
-        `);
-    }
-
+async function connectToDBAndStartServer() {
     try {
+        await client.connect();
+        db = client.db(mongodb_database);
+        userCollection = db.collection('users');
+        console.log('Connected to MongoDB');
 
-        const existingUser = await userCollection.findOne({ email: email });
-        if (existingUser) {
-            console.log("Signup failed: Email already exists.");
-            return res.status(409).send(`
-                Email already registered. <br>
-                <a href="/signup">Try again</a> or <a href="/login">Log in</a>
-            `);
-        }
-
-
-        const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-
-        const newUser = await userCollection.insertOne({
-            name: name,
-            email: email,
-            password: hashedPassword
+        // Middleware
+        const mongoStore = MongoStore.create({
+            mongoUrl: mongoUri,
+            crypto: {
+                secret: mongodb_session_secret
+            }
         });
-        console.log("User created:", newUser.insertedId);
+
+        app.use(session({
+            secret: node_session_secret,
+            store: mongoStore,
+            resave: false,
+            saveUninitialized: false,
+            cookie: { maxAge: expireSession }
+        }));
+
+        app.use(express.urlencoded({ extended: false }));
+        app.use(express.static(path.join(__dirname, 'public')));
+
+        app.use((req, res, next) => {
+            res.locals.isAuthenticated = req.session.isAuthenticated;
+            res.locals.currentUser = req.session.user;
+            next();
+        });
+
+        const requireAuth = (req, res, next) => {
+            if (!req.session.isAuthenticated) {
+                return res.redirect('/login?error=' + encodeURIComponent('Log in to view this page.'));
+            }
+            next();
+        };
+
+        const requireNoAuth = (req, res, next) => {
+            if (req.session.isAuthenticated) {
+                console.log('User already authenticated.');
+                return res.redirect('/members');
+            }
+            next();
+        };
+
+        //Admin privileges
+        const requireAdmin = (req, res, next) => {
+
+            if (!req.session.isAuthenticated) {
+                console.log('DEBUG: Not authenticated, redirecting to login.');
+                return res.redirect('/login?error=' + encodeURIComponent('Please log in to view this page.'));
+            }
+
+            if (!req.session.user || !req.session.user.user_type) {
+                console.error('ERROR: User session object or user_type is missing!', req.session);
+                return res.status(500).render('error', {
+                    pageTitle: "Session Error",
+                    message: "Your session data seems to be corrupted. Please log in again.",
+                    errorCode: 500,
+                    isAuthenticated: req.session.isAuthenticated,
+                    currentUser: req.session.user
+                });
+            }
+
+            if (req.session.user.user_type !== 'admin') {
+                console.log('DEBUG: User is not admin. Rendering 403 page.');
+
+                return res.status(403).render('error', {
+                    pageTitle: "Access Denied",
+                    message: "You do not have permission to view this page.",
+                    errorCode: 403,
+                    isAuthenticated: req.session.isAuthenticated,
+                    currentUser: req.session.user
+                });
+            }
+            next();
+        };
+
+        app.get('/', (req, res) => {
+            res.render('home', {
+                pageTitle: "Welcome",
+                query: req.query
+            });
+        });
+
+        app.get('/signup', requireNoAuth, (req, res) => {
+            res.render('signup', {
+                pageTitle: "Sign Up",
+                error: req.query.error,
+                formData: {}
+            });
+        });
+
+        app.post('/signupSubmit', requireNoAuth, async (req, res) => {
+            const { name, email, password } = req.body;
+
+            const schema = Joi.object({
+                name: Joi.string().alphanum().max(20).required(),
+                email: Joi.string().email().required(),
+                password: Joi.string().min(3).max(20).required()
+            });
+
+            const validationResult = schema.validate({ name, email, password });
+
+            if (validationResult.error) {
+                return res.redirect(`/signup?error=${encodeURIComponent(validationResult.error.details[0].message)}`);
+            }
+
+            try {
+                const existingUser = await userCollection.findOne({ email: email });
+                if (existingUser) {
+                    return res.redirect(`/signup?error=${encodeURIComponent('Email already registered. Please log in.')}`);
+                }
+
+                const hashedPassword = await bcrypt.hash(password, saltRounds);
+                const newUser = {
+                    name: name,
+                    email: email.toLowerCase(),
+                    password: hashedPassword,
+                    user_type: 'user'
+                };
+                const result = await userCollection.insertOne(newUser);
+                console.log("User created:", result.insertedId);
+
+                req.session.isAuthenticated = true;
+                req.session.user = {
+                    id: result.insertedId,
+                    name: newUser.name,
+                    email: newUser.email,
+                    user_type: newUser.user_type
+                };
+                res.redirect('/members');
+            } catch (err) {
+                console.error("Signup error:", err);
+                res.status(500).render('error', {
+                    pageTitle: "Signup Error",
+                    message: "An internal server error occurred during signup. Please try again later.",
+                });
+            }
+        });
+
+        app.get('/login', requireNoAuth, (req, res) => {
+            res.render('login', {
+                pageTitle: "Log In",
+                error: req.query.error
+            });
+        });
+
+        app.post('/loginSubmit', requireNoAuth, async (req, res) => {
+            const { email, password } = req.body;
+
+            const schema = Joi.object({
+                email: Joi.string().email().required(),
+                password: Joi.string().max(20).required()
+            });
+
+            const validationResult = schema.validate({ email, password });
+
+            if (validationResult.error) {
+                return res.redirect(`/login?error=${encodeURIComponent(validationResult.error.details[0].message)}`);
+            }
+
+            try {
+                const user = await userCollection.findOne({ email: email.toLowerCase() });
+
+                if (user && await bcrypt.compare(password, user.password)) {
+                    req.session.isAuthenticated = true;
+                    req.session.user = {
+                        id: user._id,
+                        name: user.name,
+                        email: user.email,
+                        user_type: user.user_type
+                    };
+                    res.redirect('/members');
+                } else {
+                    console.log(`Login failed for email: ${email}`);
+                    res.redirect(`/login?error=${encodeURIComponent('Invalid email or password.')}`);
+                }
+            } catch (err) {
+                console.error('Login database/bcrypt error: ', err);
+                res.status(500).render('error', {
+                    pageTitle: "Login Error",
+                    message: "An internal server error occurred during login. Please try again later.",
+                    isAuthenticated: req.session.isAuthenticated,
+                    name: req.session.name
+                });
+            }
+        });
 
 
-        req.session.isAuthenticated = true;
-        req.session.name = name;
-        req.session.email = email;
-        req.session.userId = newUser.insertedId;
+        //Admin routes
+        app.get('/admin', requireAdmin, async (req, res) => {
+            try {
+                const users = await userCollection.find({}).toArray();
+                res.render('admin', {
+                    pageTitle: 'Admin Panel',
+                    users: users,
+                    messages: req.query
+                });
+            } catch (err) {
+                console.error('Admin page error: ', err);
+                res.status(500).render('error', {
+                    pageTitle: 'Admin error',
+                    message: 'Not able to load admin data',
+                    isAuthenticated: req.session.isAuthenticated,
+                    name: req.session.name
+                });
+            }
+        });
 
-        res.redirect('/members');
+        app.post('/admin/promote/:userId', requireAdmin, async (req, res) => {
+            const userId = req.params.userId;
+            try {
+                if (!ObjectId.isValid(userId)) {
+                    return res.redirect('/admin?error=' + encodeURIComponent('Invalid user ID.'));
+                }
+                await userCollection.updateOne({ _id: new ObjectId(userId) }, { $set: { user_type: "admin" } });
+                res.redirect('/admin?success=' + encodeURIComponent('User promoted to admin.'));
+            } catch (err) {
+                console.error("Promote user error:", err);
+                res.redirect('/admin?error=' + encodeURIComponent('Error promoting user.'));
+            }
+        });
 
-    } catch (err) {
-        console.error("Signup error:", err);
-        res.status(500).send("Internal Server Error during signup.");
+        app.post('/admin/demote/:userId', requireAdmin, async (req, res) => {
+            const userId = req.params.userId;
+            try {
+                if (!ObjectId.isValid(userId)) {
+                    return res.redirect('/admin?error=' + encodeURIComponent('Invalid user ID.'));
+                }
+                await userCollection.updateOne({ _id: new ObjectId(userId) }, { $set: { user_type: "user" } });
+                res.redirect('/admin?success=' + encodeURIComponent('User demoted to user.'));
+            } catch (err) {
+                console.error("Demote user error:", err);
+                res.redirect('/admin?error=' + encodeURIComponent('Error demoting user.'));
+            }
+        });
+
+
+        app.get('/members', requireAuth, (req, res) => {
+            const images = ['IMG_0140.JPG', 'IMG_0518.jpg', 'IMG_0671.jpg', 'IMG_1270.jpg', 'IMG_1598.JPG', 'IMG_2242.JPG', 'IMG_4919.PNG'];
+            const shuffledImages = images.sort(() => Math.random() - 0.5);
+            res.render('members', {
+                pageTitle: "Members Area",
+                imageUrls: shuffledImages,
+                isAuthenticated: req.session.isAuthenticated
+            });
+        });
+
+        app.get('/logout', (req, res) => {
+            req.session.destroy((err) => {
+                if (err) {
+                    console.error('Error destroying session: ', err);
+                    return res.redirect('/?error=' + encodeURIComponent('Logout attempt failed.'));
+                }
+                res.redirect('/?message=' + encodeURIComponent('Successfully logged out!'));
+            });
+        });
+
+        // app.use(async (req, res, next) => {
+        //     res.locals.isAuthenticated = req.session.isAuthenticated;
+        //     if (req.session.isAuthenticated && req.session.user) {
+        //         const user = await userCollection.findOne({ _id: req.session.user.id });
+        //         if (user) {
+        //             req.session.user = {
+        //                 id: user._id,
+        //                 name: user.name,
+        //                 email: user.email,
+        //                 user_type: user.user_type
+        //             };
+        //         }
+        //     }
+        //     res.locals.currentUser = req.session.user;
+        //     next();
+        // });
+
+
+        app.use((req, res, next) => {
+            res.status(404).render('404', {
+                pageTitle: "Page Not Found",
+                isAuthenticated: req.session.isAuthenticated,
+                name: req.session.name
+            });
+        });
+
+
+        app.use((err, req, res, next) => {
+            console.error("Unhandled error:", err.stack);
+            res.status(500).render('error', {
+                pageTitle: "Server Error",
+                message: "Something went wrong on our end. Please try again later.",
+                isAuthenticated: req.session.isAuthenticated,
+                name: req.session.name
+            });
+        });
+
+        app.listen(port, () => {
+            console.log(`Node application listening on port ${port}`);
+        });
+
+    } catch (dbConnectErr) {
+        console.error("Failed to connect to MongoDB Atlas. Server not started.", dbConnectErr);
+        process.exit(1);
     }
-});
+}
 
-app.get('/login', requireNoAuth, (req, res) => {
-    const html = `
-    <h1>Log In</h1>
-    <form action='/loginSubmit' method='post'>
-        <input name='email' type='email' placeholder='email' required>
-        <br>
-        <input name='password' type='password' placeholder='password' required>
-        <br>
-        <button type='submit'>Submit</button>
-    </form>
-        `;
-    res.send(html);
-});
-
-app.post('/loginSubmit', requireNoAuth, async (req, res) => {
-    const { email, password } = req.body;
-
-    const schema = Joi.object({
-        email: Joi.string().email().required(),
-        password: Joi.string().max(20).required()
-    });
-
-    const validationResult = schema.validate({ email, password });
-
-
-    if (validationResult.error) {
-        console.log('Login validation error');
-        return res.status(400).send(`
-            <a href='/login'>Try again</a>
-            `);
-    }
-
-    try {
-        const user = await userCollection.findOne({ email: email });
-
-        if (user && await bcrypt.compare(password, user.password)) {
-            console.log(`Login succesful for user: ${user.email}`);
-
-            req.session.isAuthenticated = true;
-            req.session.name = user.name;
-            req.session.email = user.email;
-            req.session.userId = user._id;
-
-            res.redirect('/members');
-        } else {
-            console.log(`Login failed for email: ${email}`);
-            res.status(401).send(`
-                Invalid email/password combination.
-                <br><br>
-                <a href='/login'>Try again</a>
-                `);
-        }
-    } catch (err) {
-        console.error('Login database/bcrypt error: ', err);
-    }
-});
-
-app.get('/members', requireAuth, (req, res) => {
-    const randomImageUrl = getRandomImage();
-
-    res.send(`
-        <h1>Hello, ${req.session.name}!</h1>
-            <p>Welcome to the members area.</p>
-            <br>
-        <img src='${randomImageUrl}' alt='Randy img' style='width: 400px; border: 3px solid black;'>
-            <br>
-        <p>Refresh page to see another image</p>
-            <br>
-        <a href='/logout'> <button>Logout</button> </a>
-        `);
-});
-
-app.get('/logout', (req, res) => {
-    req.session.destroy((err) => {
-        if (err) {
-            console.error('Error: ', err);
-            return res.status(500).redirect('/');
-        }
-        console.log('User logged out');
-        res.redirect('/');
-    });
-});
-
-app.use((req, res) => {
-    res.status(404).send("Page not found - 404");
-});
-
-app.listen(port, () => {
-    console.log(`Node application listening on port ${port}`);
-});
+connectToDBAndStartServer();
