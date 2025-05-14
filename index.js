@@ -12,6 +12,14 @@ const app = express();
 const port = process.env.PORT || 3000;
 const expireSession = 60 * 60 * 1000; // 1 hour
 
+const noCache = (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+}
+
 const requireEnvVars = [
     'MONGODB_USER',
     'MONGODB_PASSWORD',
@@ -102,6 +110,7 @@ async function connectToDBAndStartServer() {
 
             if (!req.session.isAuthenticated) {
                 console.log('DEBUG: Not authenticated, redirecting to login.');
+
                 return res.redirect('/login?error=' + encodeURIComponent('Please log in to view this page.'));
             }
 
@@ -130,7 +139,7 @@ async function connectToDBAndStartServer() {
             next();
         };
 
-        app.get('/', (req, res) => {
+        app.get('/', noCache, (req, res) => {
             res.render('home', {
                 pageTitle: "Welcome",
                 query: req.query
@@ -243,7 +252,7 @@ async function connectToDBAndStartServer() {
 
 
         //Admin routes
-        app.get('/admin', requireAdmin, async (req, res) => {
+        app.get('/admin', noCache, requireAdmin, async (req, res) => {
             try {
                 const users = await userCollection.find({}).toArray();
                 res.render('admin', {
@@ -268,7 +277,10 @@ async function connectToDBAndStartServer() {
                 if (!ObjectId.isValid(userId)) {
                     return res.redirect('/admin?error=' + encodeURIComponent('Invalid user ID.'));
                 }
-                await userCollection.updateOne({ _id: new ObjectId(userId) }, { $set: { user_type: "admin" } });
+                await userCollection.updateOne(
+                    { _id: new ObjectId(userId) },
+                    { $set: { user_type: "admin" } });
+
                 res.redirect('/admin?success=' + encodeURIComponent('User promoted to admin.'));
             } catch (err) {
                 console.error("Promote user error:", err);
@@ -282,7 +294,10 @@ async function connectToDBAndStartServer() {
                 if (!ObjectId.isValid(userId)) {
                     return res.redirect('/admin?error=' + encodeURIComponent('Invalid user ID.'));
                 }
-                await userCollection.updateOne({ _id: new ObjectId(userId) }, { $set: { user_type: "user" } });
+                await userCollection.updateOne(
+                    { _id: new ObjectId(userId) },
+                    { $set: { user_type: "user" } });
+
                 res.redirect('/admin?success=' + encodeURIComponent('User demoted to user.'));
             } catch (err) {
                 console.error("Demote user error:", err);
@@ -291,7 +306,7 @@ async function connectToDBAndStartServer() {
         });
 
 
-        app.get('/members', requireAuth, (req, res) => {
+        app.get('/members', noCache, requireAuth, (req, res) => {
             const images = ['IMG_0140.JPG', 'IMG_0518.jpg', 'IMG_0671.jpg', 'IMG_1270.jpg', 'IMG_1598.JPG', 'IMG_2242.JPG', 'IMG_4919.PNG'];
             const shuffledImages = images.sort(() => Math.random() - 0.5);
             res.render('members', {
@@ -310,24 +325,6 @@ async function connectToDBAndStartServer() {
                 res.redirect('/?message=' + encodeURIComponent('Successfully logged out!'));
             });
         });
-
-        // app.use(async (req, res, next) => {
-        //     res.locals.isAuthenticated = req.session.isAuthenticated;
-        //     if (req.session.isAuthenticated && req.session.user) {
-        //         const user = await userCollection.findOne({ _id: req.session.user.id });
-        //         if (user) {
-        //             req.session.user = {
-        //                 id: user._id,
-        //                 name: user.name,
-        //                 email: user.email,
-        //                 user_type: user.user_type
-        //             };
-        //         }
-        //     }
-        //     res.locals.currentUser = req.session.user;
-        //     next();
-        // });
-
 
         app.use((req, res, next) => {
             res.status(404).render('404', {
